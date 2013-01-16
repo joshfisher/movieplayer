@@ -23,7 +23,13 @@ namespace jf {
 		bool open(const char* path);
 		void close();
 		void play();
+		void pause();
+		void stop();
 		void seek(double sec);
+		
+		bool isPlaying() const;
+		bool isPaused() const;
+		bool isStopped() const;
 		
 		void setRect(float x, float y, float w, float h);
 		void draw();

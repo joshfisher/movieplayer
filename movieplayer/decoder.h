@@ -25,6 +25,7 @@ extern "C" {
 
 namespace jf {
 	
+	// single frame of RGB video
 	struct VideoFrame {
 		typedef std::shared_ptr<VideoFrame> Ptr;
 		
@@ -35,32 +36,11 @@ namespace jf {
 		
 		double outTime;
 		
-		~VideoFrame() {
-			if(bytes)
-				delete [] bytes;
-		}
-		
-		static Ptr create(double o, int w, int h, int sz, uint8_t* ptr) {
-			VideoFrame* fr = new VideoFrame;
-			fr->outTime = o;
-			fr->width = w;
-			fr->height = h;
-			fr->numBytes = sz;
-			fr->bytes = new uint8_t[sz];
-			if(ptr) {
-				memcpy(fr->bytes, ptr, sz);
-			}
-			return Ptr(fr);
-		}
+		~VideoFrame();
+		static Ptr create(double o, int w, int h, int sz, uint8_t* ptr);
 		
 	private:
-		VideoFrame()
-		:	width(0)
-		,	height(0)
-		,	numBytes(0)
-		,	bytes(NULL)
-		{}
-		
+		VideoFrame();
 		VideoFrame(const VideoFrame&) =delete;
 		VideoFrame& operator=(const VideoFrame&) =delete;
 	};
@@ -72,15 +52,26 @@ namespace jf {
 		
 		bool open(const char* file);
 		void close();
-		void start();
-		void seek(double time);
 
 		bool isOpen() const;
 		bool hasAudio() const;
 		bool hasVideo() const;
+		int getVideoWidth() const;
+		int getVideoHeight() const;
+		int getBytesPerVideoFrame() const;
+
+		void seek(double time);
+		void stepForward();
+		void stepBackward();
+
+		VideoFrame::Ptr grabVideoForTime(double time);
+		VideoFrame::Ptr previousVideoFrame();
+		VideoFrame::Ptr nextVideoFrame();
 		
-		void videoFrameSize(int* width, int* height, int* numBytes) const;
-		VideoFrame::Ptr consumeVideoFrame(double time);
+//		void startBuffering();
+//		void stopBuffering();
+//		bool isNewFrameAvailable();
+//		VideoFrame::Ptr popVideoFrame();
 		
 	private:
 		AVFormatContext* format;
@@ -88,7 +79,11 @@ namespace jf {
 		struct {
 			AVStream* stream;
 			AVCodecContext* context;
-			
+			SwsContext* sws;
+			AVFrame* frame;
+			AVFrame* frameRGB;
+			AVPacket packet;
+
 			int bytesPerFrame;
 			int width, height;
 
@@ -139,6 +134,10 @@ namespace jf {
 			void flush();
 		};
 		
+		struct AudioQueue {
+			
+		};
+		
 		PacketQueue videoQueue;
 		PacketQueue audioQueue;
 		FrameQueue frameQueue;
@@ -147,7 +146,7 @@ namespace jf {
 		std::thread demuxThread;
 		std::thread videoThread;
 		std::thread audioThread;
-				
+
 		void demux();
 		void decodeVideo();
 		void decodeAudio();

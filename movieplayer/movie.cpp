@@ -20,6 +20,19 @@
 
 namespace jf {
 	
+	void uploadFrame(Buffer pbo, Texture tex, VideoFrame::Ptr frame) {
+		tex.bind();
+		
+		pbo.bind();
+		pbo.upload(frame->numBytes, frame->bytes);
+		
+		tex.upload(frame->width, frame->height, GL_RGB, 0);
+		pbo.unbind();
+		
+		tex.generateMipMaps();
+		tex.unbind();
+	}
+	
 	MoviePlayer::MoviePlayer()
 	:	decoder(new Decoder)
 	,	state(Stopped)
@@ -30,16 +43,13 @@ namespace jf {
 		close();
 		
 		if(decoder->open(path)) {
-			int w, h, b;
-			decoder->videoFrameSize(&w, &h, &b);
-
 			texture.create(GL_TEXTURE_2D, GL_RGB);
 			texture.configure(TextureParameters()
 							  .setFilters(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)
 							  .setLevels(0, 10));
 			
 			pixelBuffer.create(GL_PIXEL_UNPACK_BUFFER, GL_STREAM_DRAW);
-			pixelBuffer.upload(b, NULL);
+			pixelBuffer.upload(decoder->getBytesPerVideoFrame(), NULL);
 			
 			float verts[] = {
 				0,0, 0,1,
@@ -60,12 +70,15 @@ namespace jf {
 			vao.unbind();
 			
 			quad.unbind();
+			
+//			uploadFrame(pixelBuffer, texture, decoder->grabVideoForTime(0.0));
 		}
 		
 		return true;
 	}
 	
 	void MoviePlayer::close() {
+		state = Stopped;
 		decoder->close();
 		texture.destroy();
 		pixelBuffer.destroy();
@@ -74,11 +87,11 @@ namespace jf {
 	}
 	
 	void MoviePlayer::play() {
-		if(decoder) {
+		if(decoder->isOpen()) {
 			switch(state) {
 				case Stopped:
 					playStart = SDL_GetTicks() / 1000.0;
-					decoder->start();
+					decoder->startBuffering();
 					break;
 					
 				case Paused:
@@ -92,15 +105,57 @@ namespace jf {
 		}
 	}
 	
+	void MoviePlayer::pause() {
+		if(decoder->isOpen()) {
+			switch(state) {
+				case Stopped:
+				case Paused:
+					break;
+					
+				case Playing:
+					break;
+			}
+			
+			state = Paused;
+		}
+	}
+	
+	void MoviePlayer::stop() {
+		if(decoder->isOpen()) {
+			switch(state) {
+				case Playing:
+				case Paused:
+					decoder->stopBuffering();
+					
+				case Stopped:
+					break;
+			}
+			
+			state = Stopped;
+		}
+	}
+	
 	void MoviePlayer::seek(double time) {
-		if(decoder)
+		if(decoder->isOpen())
 			decoder->seek(time);
 	}
 	
+	bool MoviePlayer::isPlaying() const {
+		return state == Playing;
+	}
+	
+	bool MoviePlayer::isPaused() const {
+		return state == Paused;
+	}
+	
+	bool MoviePlayer::isStopped() const {
+		return state == Stopped;
+	}
+
 	void MoviePlayer::setRect(float x, float y, float w, float h) {
 		if(decoder->hasVideo()) {
-			int vW, vH, numBytes;
-			decoder->videoFrameSize(&vW, &vH, &numBytes);
+			int vW = decoder->getVideoWidth();
+			int vH = decoder->getVideoHeight();
 			
 			float vR = vH / (float)vW;
 			float hNew = w * vR;
@@ -137,22 +192,21 @@ namespace jf {
 
 	void MoviePlayer::draw() {
 		if(decoder && decoder->hasVideo()) {
-			texture.bind();
-			
-			double now = SDL_GetTicks() / 1000.0;
-			VideoFrame::Ptr frame = decoder->consumeVideoFrame(now - playStart);
-			
-			if(frame) {
-				// update the texture
-				pixelBuffer.bind();
-				pixelBuffer.upload(frame->numBytes, frame->bytes);
-				
-				texture.upload(frame->width, frame->height, GL_RGB, 0);
-				pixelBuffer.unbind();
-				
-				texture.generateMipMaps();
+			if(
+			if(state == Playing) {
+				VideoFrame::Ptr frame = decoder->nextVideoFrame();
+
+				double now = SDL_GetTicks() / 1000.0;
+
+				if(frame &&
+				   frame->outTime < (now - playStart))
+				{
+					uploadFrame(pixelBuffer, texture, frame);
+					decoder->popVideoFrame();
+				}
 			}
 			
+			texture.bind();
 			vao.bind();
 			glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 			vao.unbind();

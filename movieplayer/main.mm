@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
 	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-
+	
 	int width = 600;
 	int height = 400;
 	float aspect = height / (float)width;
@@ -50,6 +50,8 @@ int main(int argc, char *argv[]) {
 	SDL_GLContext ctx = SDL_GL_CreateContext((SDL_Window*)win);
 	SDL_GL_MakeCurrent((SDL_Window*)win, (SDL_GLContext)ctx);
 	SDL_GL_SetSwapInterval(1);
+	
+	SDL_RaiseWindow(win);
 	
 	using namespace jf;
 	Program prog;
@@ -68,7 +70,6 @@ int main(int argc, char *argv[]) {
 	jf::MoviePlayer movie;
 	if(movie.open("resources/real.mov")) {
 		movie.setRect(0,0,1,aspect);
-		movie.play();
 	}
 	
 	bool done = 0;
@@ -88,19 +89,34 @@ int main(int argc, char *argv[]) {
 							break;
 					}
 					break;
+					
+				case SDL_KEYDOWN:
+					if(event.key.keysym.mod & (KMOD_LGUI | KMOD_RGUI)) {
+						if(event.key.keysym.sym == SDLK_p) {
+							if(movie.isPlaying())
+								movie.pause();
+							else if(movie.isPaused() || movie.isStopped())
+								movie.play();
+						}
+						else if(event.key.keysym.sym == SDLK_s) {
+							movie.stop();
+						}
+					}
+					break;
+					
 				case SDL_QUIT:
 					done = true;
 					break;
 			}
 		}
-
+		
 		glClear(GL_COLOR_BUFFER_BIT);
 		
 		movie.draw();
 		
 		SDL_GL_SwapWindow(win);
 	}
-
+	
 	prog.destroy();
 	movie.close();
 	
