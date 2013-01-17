@@ -40,76 +40,6 @@ namespace jf {
 		return Ptr(fr);
 	}
 
-	Decoder::PacketQueue::PacketQueue()
-	:	count(0)
-	{}
-	
-	Decoder::PacketQueue::~PacketQueue() {
-		flush();
-	}
-	
-	
-	void Decoder::PacketQueue::push(AVPacket* p) {
-		std::unique_lock<std::mutex> lock(mutex);
-		AVPacket pkt = *p;
-		av_dup_packet(&pkt);
-		packets.push_back(pkt);
-		count += 1;
-	}
-	
-	int Decoder::PacketQueue::pop(AVPacket* p) {
-		std::unique_lock<std::mutex> lock(mutex);
-		if(!packets.empty()) {
-			*p = packets.front();
-			packets.pop_front();
-			count -= 1;
-			return 1;
-		}
-		return 0;
-	}
-	
-	void Decoder::PacketQueue::flush() {
-		std::unique_lock<std::mutex> lock(mutex);
-		for(AVPacket& pkt : packets) {
-			av_free_packet(&pkt);
-		}
-		packets.clear();
-		count = 0;
-	}
-	
-	Decoder::FrameQueue::FrameQueue()
-	:	count(0)
-	{}
-	
-	void Decoder::FrameQueue::push(VideoFrame::Ptr p) {
-		std::unique_lock<std::mutex> lock(mutex);
-		frames.push_back(p);
-		count += 1;
-	}
-	
-	VideoFrame::Ptr Decoder::FrameQueue::pop() {
-		std::unique_lock<std::mutex> lock(mutex);
-		if(!frames.empty()) {
-			VideoFrame::Ptr fr = frames.front();
-			frames.pop_front();
-			count -= 1;
-			return fr;
-		}
-		return VideoFrame::Ptr();
-	}
-	
-	VideoFrame::Ptr Decoder::FrameQueue::front() {
-		std::unique_lock<std::mutex> lock(mutex);
-		if(!frames.empty())
-			return frames.front();
-		return VideoFrame::Ptr();
-	}
-	
-	void Decoder::FrameQueue::flush() {
-		std::unique_lock<std::mutex> lock(mutex);
-		frames.clear();
-	}
-
 	int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic) {
 		int ret = avcodec_default_get_buffer(c, pic);
 		uint64_t* pts = (uint64_t*)av_malloc(sizeof(uint64_t));
@@ -121,6 +51,78 @@ namespace jf {
 	void mp_release_video_buffer(AVCodecContext* c, AVFrame* pic) {
 		if(pic) av_freep(&pic->opaque);
 		avcodec_default_release_buffer(c, pic);
+	}
+
+	Demuxer* Demuxer::open(const char* path) {
+		std::call_once(ffmpeg_initialized, []() {
+			avcodec_register_all();
+			av_register_all();
+			avformat_network_init();
+		});
+		
+		AVFormatContext* format = NULL;
+		
+		try {
+			if(avformat_open_input(&format, path, NULL, NULL) < 0)
+				throw -1;
+			if(avformat_find_stream_info(format, NULL) < 0) {
+				throw -1;
+			}
+			
+			Demuxer* de = new Demuxer();
+			de->format = format;
+			return de;
+		}
+		catch(...) {
+			if(format)
+				avformat_close_input(&format);
+		}
+		
+		return NULL;
+	}
+	
+	Demuxer::Demuxer()
+	:	format(NULL)
+	{}
+	
+	Demuxer::~Demuxer() {
+		if(format) {
+			avformat_close_input(&format);
+			format = NULL;
+		}
+	}
+	
+	VideoDecoder* VideoDecoder::open(Demuxer* de) {
+		AVCodec* codec = NULL;
+		int streamIdx = av_find_best_stream(de->format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+		if(streamIdx < 0 || !codec)
+			return NULL;
+		
+		AVStream* stream = de->format->streams[streamIdx];
+		AVCodecContext* context = stream->codec;
+		if(avcodec_open2(context, codec, NULL) < 0)
+			return NULL;
+		
+		VideoDecoder* dec = new VideoDecoder();
+		dec->
+	}
+	
+	VideoDecoder::VideoDecoder()
+	:	demuxer(NULL)
+	,	streamIdx(-1)
+	,	stream(NULL)
+	,	context(NULL)
+	,	frame(NULL)
+	,	frameRGB(NULL)
+	,	sws(NULL)
+	{}
+	
+	VideoDecoder::~VideoDecoder() {
+		if(context) {
+			if(context->opaque)
+				av_free(context->opaque);
+			avcodec_close(context);
+		}
 	}
 
 	bool Decoder::openVideo() {
@@ -181,88 +183,26 @@ namespace jf {
 		video.height = 0;
 		video.bytesPerFrame = 0;
 		video.streamIdx = -1;
-		
-		videoQueue.flush();
 	}
 	
-	bool Decoder::openAudio() {
-		AVCodec* codec = NULL;
-		int stream = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, video.streamIdx, &codec, 0);
-		if(stream < 0 || !codec)
-			return false;
-		
-		audio.streamIdx = stream;
-		audio.stream = format->streams[audio.streamIdx];
-		audio.context = audio.stream->codec;
-		if(avcodec_open2(audio.context, codec, NULL) < 0)
-			return false;
-		
-		return true;
-	}
-
-	void Decoder::closeAudio() {
-		if(audio.context) {
-			avcodec_close(audio.context);
-		}
-		
-		audio.stream = NULL;
-		audio.context = NULL;
-		audio.streamIdx = -1;
-		
-		audioQueue.flush();
-	}
-
 	Decoder::Decoder()
 	:	format(NULL)
 	,	shutdown(false)
 	{
-		std::call_once(ffmpeg_initialized, []() {
-			avcodec_register_all();
-			av_register_all();
-			avformat_network_init();
-		});
 
 		video.context = NULL;
 		video.streamIdx = -1;
 		video.bytesPerFrame = 0;
 		video.width = 0;
 		video.height = 0;
-		
-		audio.context = NULL;
-		audio.streamIdx = -1;
-	}
-	
-	Decoder::~Decoder() {
-		close();
-	}
-	
-	bool Decoder::open(const char* path) {
-		if(avformat_open_input(&format, path, NULL, NULL) < 0) {
-			return false;
-		}
-		
-		if(avformat_find_stream_info(format, NULL) < 0) {
-			return false;
-		}
-		
-		openVideo();
-		openAudio();
-		
-		return hasAudio() || hasVideo();
 	}
 	
 	void Decoder::close() {
-//		stopBuffering();
-		closeAudio();
 		closeVideo();
 	}
 	
 	bool Decoder::isOpen() const {
 		return (hasAudio() || hasVideo());
-	}
-	
-	bool Decoder::hasAudio() const {
-		return format && audio.streamIdx >= 0 && audio.context != NULL;
 	}
 	
 	bool Decoder::hasVideo() const {
@@ -330,47 +270,17 @@ namespace jf {
 		return VideoFrame::Ptr();
 	}
 	
-//	void Decoder::startBuffering() {
-//		shutdown = false;
-//		demuxThread = std::thread(&Decoder::demux, this);
-//		videoThread = std::thread(&Decoder::decodeVideo, this);
-//	}
-//	
-//	void Decoder::stopBuffering() {
-//		shutdown = true;
-//		if(demuxThread.joinable())	demuxThread.join();
-//		if(videoThread.joinable())  videoThread.join();
-//		if(audioThread.joinable())	audioThread.join();
-//	}
-//	
-//	bool Decoder::isNewFrameAvailable() {
-//		return video.clock + av_q2d(video.stream->time_base) < frameQueue.front()->outTime;
-//	}
-//	
-//	VideoFrame::Ptr Decoder::popVideoFrame() {
-//		VideoFrame::Ptr frame = frameQueue.front();
-//		if(frame) {
-//			frameQueue.pop();
-//			return frame;
-//		}
-//		
-//		return VideoFrame::Ptr();
-//	}
-	
 	void Decoder::demux() {
-		AVPacket packet;
-		while(!shutdown) {
-			if(av_read_frame(format, &packet) < 0) {
-				break;
-			}
-			
-			if(packet.stream_index == video.streamIdx)
-				videoQueue.push(&packet);
-			else if(packet.stream_index == audio.streamIdx)
-				audioQueue.push(&packet);
-			else
-				av_free_packet(&packet);
+		if(av_read_frame(format, &packet) < 0) {
+			break;
 		}
+		
+		if(packet.stream_index == video.streamIdx)
+			videoQueue.push(&packet);
+		else if(packet.stream_index == audio.streamIdx)
+			audioQueue.push(&packet);
+		else
+			av_free_packet(&packet);
 	}
 	
 	void Decoder::decodeVideo() {
