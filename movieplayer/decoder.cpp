@@ -173,8 +173,10 @@ namespace jf {
 	}
 	
 	void Demuxer::seekToTime(double time) {
-		int idx = getStreamIndex(AVMEDIA_TYPE_VIDEO);
+		int64_t ts = time * AV_TIME_BASE - AV_TIME_BASE;
 		
+		avformat_seek_file(format, -1, INT64_MIN, ts, ts, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_FRAME);
+
 		for(auto p : packetQueues)
 			p.second->flush();
 	}
@@ -204,33 +206,33 @@ namespace jf {
 		return Ptr(fr);
 	}
 
-	uint64_t avcontext_getOpaque(AVCodecContext* context) {
-		return *(uint64_t*)context->opaque;
-	}
-	
-	void avcontext_setOpaque(AVCodecContext* context, uint64_t i) {
-		*(uint64_t*)context->opaque = i;
-	}
-	
-	uint64_t avframe_getOpaque(AVFrame* frame) {
-		return *(uint64_t*)frame->opaque;
-	}
-	
-	void avframe_setOpaque(AVFrame* frame, uint64_t i) {
-		*(uint64_t*)frame->opaque = i;
-	}
-
-	int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic) {
-		int ret = avcodec_default_get_buffer(c, pic);
-		pic->opaque = av_malloc(sizeof(uint64_t));
-		avframe_setOpaque(pic, avcontext_getOpaque(c));
-		return ret;
-	}
-	
-	void mp_release_video_buffer(AVCodecContext* c, AVFrame* pic) {
-		if(pic) av_freep(&pic->opaque);
-		avcodec_default_release_buffer(c, pic);
-	}
+//	uint64_t avcontext_getOpaque(AVCodecContext* context) {
+//		return *(uint64_t*)context->opaque;
+//	}
+//	
+//	void avcontext_setOpaque(AVCodecContext* context, uint64_t i) {
+//		*(uint64_t*)context->opaque = i;
+//	}
+//	
+//	uint64_t avframe_getOpaque(AVFrame* frame) {
+//		return *(uint64_t*)frame->opaque;
+//	}
+//	
+//	void avframe_setOpaque(AVFrame* frame, uint64_t i) {
+//		*(uint64_t*)frame->opaque = i;
+//	}
+//
+//	int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic) {
+//		int ret = avcodec_default_get_buffer(c, pic);
+//		pic->opaque = av_malloc(sizeof(uint64_t));
+//		avframe_setOpaque(pic, avcontext_getOpaque(c));
+//		return ret;
+//	}
+//	
+//	void mp_release_video_buffer(AVCodecContext* c, AVFrame* pic) {
+//		if(pic) av_freep(&pic->opaque);
+//		avcodec_default_release_buffer(c, pic);
+//	}
 
 	VideoDecoder* VideoDecoder::open(Demuxer* de) {
 		if(!de)
@@ -244,14 +246,20 @@ namespace jf {
 		dec->demuxer = de;
 		dec->packets = de->getPacketQueue(st);
 		dec->streamIdx = st;
-		dec->context = de->getStream(st)->codec;
+		dec->stream = de->getStream(st);
+		dec->context = dec->stream->codec;
 		dec->frame = avcodec_alloc_frame();
 		dec->frameRGB = avcodec_alloc_frame();
 
-		// look at link for why we need to override the frame creation and release functions
-		// http://dranger.com/ffmpeg/tutorial05.html
-		dec->context->get_buffer = mp_create_video_buffer;
-		dec->context->release_buffer = mp_release_video_buffer;
+		int64_t numFrames = dec->stream->nb_frames;
+		double frameRate = av_q2d(dec->stream->r_frame_rate);
+		double bitRate = dec->context->bit_rate / 1000000.0;
+		printf("video stream:\n\t%lld frames\n\t%f frames/sec\n\t%f bits/sec\n", numFrames, frameRate, bitRate);
+		
+//		// look at link for why we need to override the frame creation and release functions
+//		// http://dranger.com/ffmpeg/tutorial05.html
+//		dec->context->get_buffer = mp_create_video_buffer;
+//		dec->context->release_buffer = mp_release_video_buffer;
 		
 		dec->width = dec->context->width;
 		dec->height = dec->context->height;
@@ -282,7 +290,8 @@ namespace jf {
 	,	height(0)
 	,	bytesPerFrame(0)
 	,	clock(0.0)
-	,	frameNumber(0L)
+	,	nextFrameTime(0.0)
+	,	currentFrame(0)
 	{}
 	
 	VideoDecoder::~VideoDecoder() {
@@ -296,8 +305,25 @@ namespace jf {
 	int VideoDecoder::getBytesPerFrame() { return bytesPerFrame; }
 
 	VideoFrame::Ptr VideoDecoder::previousFrame() {
-		seekToFrame(context->frame_number - 1);
-		return nextFrame();
+		int64_t pts = (currentFrame - 1);
+		
+		seekToFrame(pts);
+		
+		while(true) {
+			VideoFrame::Ptr frame = nextFrame();
+			if(!frame)
+				break;
+			
+			if(currentFrame > pts) {
+				break;
+			}
+			
+			if(currentFrame == pts) {
+				return frame;
+			}
+		}
+		
+		return VideoFrame::Ptr();
 	}
 	
 	VideoFrame::Ptr VideoDecoder::nextFrame() {
@@ -321,43 +347,27 @@ namespace jf {
 
 			// look at link for a discussion of why the pts has to be handled this way
 			// http://dranger.com/ffmpeg/tutorial05.html
-			avcontext_setOpaque(context, packet.pts);
+//			avcontext_setOpaque(context, packet.pts);
 			
 			// decode next packet of video
 			int complete = 0;
 			avcodec_decode_video2(context, frame, &complete, &packet);
 			// free allocated packet resources
 			av_free_packet(&packet);
-			
-			// figure out the actual pts of this frame
-			double pts = 0.0;
-			if(packet.dts == AV_NOPTS_VALUE && avframe_getOpaque(frame) != AV_NOPTS_VALUE)
-				pts = avframe_getOpaque(frame);
-			else if(packet.dts != AV_NOPTS_VALUE)
-				pts = packet.dts;
-			else
-				pts = 0;
-			
-			// put pts into seconds
-			frameNumber = pts;
-			pts *= av_q2d(context->time_base);
-			
-			printf("%lld\n", frameNumber);
-			
+
 			// we decoded a whole frame
 			if(complete) {
-				double delay;
+				currentDts = packet.dts;
+				currentFrame = frame->pkt_pts;
+				currentDts = frame->pkt_dts;
+				clock = currentFrame * av_q2d(stream->time_base);
 				
-				if(pts != 0)
-					clock = pts;
-				else
-					pts = clock;
-				
+				double delay = 0.0;
 				delay = av_q2d(context->time_base);
 				delay += frame->repeat_pict * (delay * 0.5);
-				clock += delay;
+				nextFrameTime = clock + delay;
 				
-				VideoFrame::Ptr rez = VideoFrame::create(pts, width, height, bytesPerFrame, NULL);
+				VideoFrame::Ptr rez = VideoFrame::create(clock, width, height, bytesPerFrame, NULL);
 				avpicture_fill((AVPicture*)frameRGB, rez->bytes, PIX_FMT_RGB24, width, height);
 				sws_scale(sws, (uint8_t const* const*)frame->data, frame->linesize, 0, height, frameRGB->data, frameRGB->linesize);
 				return rez;
@@ -367,11 +377,11 @@ namespace jf {
 		return VideoFrame::Ptr();
 	}
 	
-	void VideoDecoder::seekToFrame(int frame) {
-		demuxer->seekToFrame(frame);
-	}
+	int64_t VideoDecoder::getCurrentFrame() { return currentFrame; }
+	double VideoDecoder::getCurrentTime() { return clock; }
+	double VideoDecoder::getNextTime() { return nextFrameTime; }
 	
-	void VideoDecoder::seekToTime(double time) {
-	}
+	void VideoDecoder::seekToFrame(int64_t frame) { demuxer->seekToTime(frame * av_q2d(stream->time_base)); }
+	void VideoDecoder::seekToTime(double time) { demuxer->seekToTime(time); }
 	
 }

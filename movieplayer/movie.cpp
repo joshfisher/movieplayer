@@ -111,13 +111,21 @@ namespace jf {
 	}
 	
 	void MoviePlayer::previousFrame() {
-		if(videoDecoder)
-			uploadFrame(pixelBuffer, texture, videoDecoder->previousFrame());
+		if(videoDecoder) {
+			VideoFrame::Ptr frame = videoDecoder->previousFrame();
+			if(frame) {
+				uploadFrame(pixelBuffer, texture, frame);
+			}
+		}
 	}
 	
 	void MoviePlayer::nextFrame() {
-		if(videoDecoder)
-			uploadFrame(pixelBuffer, texture, videoDecoder->nextFrame());
+		if(videoDecoder) {
+			VideoFrame::Ptr frame = videoDecoder->nextFrame();
+			if(frame) {
+				uploadFrame(pixelBuffer, texture, frame);
+			}
+		}
 	}
 	
 	bool MoviePlayer::isPlaying() const {

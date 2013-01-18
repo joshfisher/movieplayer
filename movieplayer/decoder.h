@@ -93,6 +93,11 @@ namespace jf {
 		VideoFrame::Ptr previousFrame();
 		VideoFrame::Ptr nextFrame();
 		
+		int64_t getCurrentFrame();
+		double getCurrentTime();
+		double getNextTime();
+		
+		void seekToFrame(int64_t frame);
 		void seekToTime(double time);
 		
 	private:
@@ -102,12 +107,15 @@ namespace jf {
 		PacketQueue* packets;
 		
 		int streamIdx;
+		AVStream* stream;
 		AVCodecContext* context;
 		AVFrame *frame, *frameRGB;
 		SwsContext* sws;
 		
 		double clock;
-		uint64_t frameNumber;
+		double nextFrameTime;
+		int64_t currentFrame;
+		int64_t currentDts;
 		int width, height, bytesPerFrame;
 	};
 
