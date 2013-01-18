@@ -25,6 +25,42 @@ extern "C" {
 
 namespace jf {
 	
+	class PacketQueue {
+		std::list<AVPacket> packets;
+		
+	public:
+		PacketQueue();
+		bool isEmpty();
+		void push(AVPacket pkt);
+		int pop(AVPacket* pkt);
+		void flush();
+		
+		static AVPacket FlushPacket;
+		static bool isFlushPacket(AVPacket pct);
+	};
+	
+	class Demuxer {
+	public:
+		static Demuxer* open(const char*);
+		~Demuxer();
+		
+		AVFormatContext* getFormat();
+		int getStreamIndex(AVMediaType);
+		AVStream* getStream(int streamIdx);
+		PacketQueue* getPacketQueue(int streamIdx);
+		
+		// trigger loading packets into all registered queues
+		void demux(int streamIndx);
+
+		void seekToTime(double time);
+		
+	private:
+		Demuxer();
+		
+		AVFormatContext* format;
+		std::map<int,PacketQueue*> packetQueues;
+	};
+	
 	// single frame of RGB video
 	struct VideoFrame {
 		typedef std::shared_ptr<VideoFrame> Ptr;
@@ -44,37 +80,35 @@ namespace jf {
 		VideoFrame(const VideoFrame&) =delete;
 		VideoFrame& operator=(const VideoFrame&) =delete;
 	};
-	
-	class Demuxer {
+
+	class VideoDecoder  {
 	public:
-		AVFormatContext* format;
+		static VideoDecoder* open(Demuxer*);
+		~VideoDecoder();
 		
-		static Demuxer* open(const char*);
-		~Demuxer();
+		int getWidth();
+		int getHeight();
+		int getBytesPerFrame();
 		
-		void seek(double time);
+		VideoFrame::Ptr previousFrame();
+		VideoFrame::Ptr nextFrame();
+		
+		void seekToTime(double time);
 		
 	private:
-		Demuxer();
-		Demuxer(const Demuxer&) =delete;
-		Demuxer& operator=(const Demuxer&) =delete;
-	};
-	
-	class VideoDecoder {
-	public:
+		VideoDecoder();
+		
 		Demuxer* demuxer;
+		PacketQueue* packets;
 		
 		int streamIdx;
-		AVStream* stream;
 		AVCodecContext* context;
 		AVFrame *frame, *frameRGB;
 		SwsContext* sws;
 		
-		static VideoDecoder* open(Demuxer*);
-		~VideoDecoder();
-		
-	private:
-		VideoDecoder();
+		double clock;
+		uint64_t frameNumber;
+		int width, height, bytesPerFrame;
 	};
 
 }

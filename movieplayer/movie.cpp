@@ -34,110 +34,90 @@ namespace jf {
 	}
 	
 	MoviePlayer::MoviePlayer()
-	:	decoder(new Decoder)
+	:	demuxer(NULL)
+	,	videoDecoder(NULL)
 	,	state(Stopped)
 	,	playStart(0)
 	{}
 	
 	bool MoviePlayer::open(const char* path) {
 		close();
+	
+		if(!(demuxer = Demuxer::open(path)))
+			return false;
 		
-		if(decoder->open(path)) {
-			texture.create(GL_TEXTURE_2D, GL_RGB);
-			texture.configure(TextureParameters()
-							  .setFilters(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)
-							  .setLevels(0, 10));
-			
-			pixelBuffer.create(GL_PIXEL_UNPACK_BUFFER, GL_STREAM_DRAW);
-			pixelBuffer.upload(decoder->getBytesPerVideoFrame(), NULL);
-			
-			float verts[] = {
-				0,0, 0,1,
-				1,0, 1,1,
-				1,1, 1,0,
-				0,1, 0,0
-			};
-			
-			quad.create(GL_ARRAY_BUFFER, GL_STATIC_DRAW);
-			quad.upload(sizeof(verts), verts);
-			
-			vao.create();
-			VertexLayout layout;
-			layout.addAttribute(0, 2, GL_FLOAT);
-			layout.addAttribute(1, 2, GL_FLOAT);
-			layout.fitStrideToAttributes();
-			layout.configure();
-			vao.unbind();
-			
-			quad.unbind();
-			
-//			uploadFrame(pixelBuffer, texture, decoder->grabVideoForTime(0.0));
-		}
+		if(!(videoDecoder = VideoDecoder::open(demuxer)))
+		   return false;
+
+		texture.create(GL_TEXTURE_2D, GL_RGB);
+		texture.configure(TextureParameters()
+						  .setFilters(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)
+						  .setLevels(0, 10));
+		
+		pixelBuffer.create(GL_PIXEL_UNPACK_BUFFER, GL_STREAM_DRAW);
+		pixelBuffer.upload(videoDecoder->getBytesPerFrame(), NULL);
+		
+		float verts[] = {
+			0,0, 0,1,
+			1,0, 1,1,
+			1,1, 1,0,
+			0,1, 0,0
+		};
+		
+		quad.create(GL_ARRAY_BUFFER, GL_STATIC_DRAW);
+		quad.upload(sizeof(verts), verts);
+		
+		vao.create();
+		VertexLayout layout;
+		layout.addAttribute(0, 2, GL_FLOAT);
+		layout.addAttribute(1, 2, GL_FLOAT);
+		layout.fitStrideToAttributes();
+		layout.configure();
+		vao.unbind();
+		
+		quad.unbind();
+
+		uploadFrame(pixelBuffer, texture, videoDecoder->nextFrame());
 		
 		return true;
 	}
 	
 	void MoviePlayer::close() {
 		state = Stopped;
-		decoder->close();
 		texture.destroy();
 		pixelBuffer.destroy();
 		vao.destroy();
 		quad.destroy();
+		if(videoDecoder) {
+			delete videoDecoder;
+			videoDecoder = NULL;
+		}
+		if(demuxer) {
+			delete demuxer;
+			demuxer = NULL;
+		}
 	}
 	
 	void MoviePlayer::play() {
-		if(decoder->isOpen()) {
-			switch(state) {
-				case Stopped:
-					playStart = SDL_GetTicks() / 1000.0;
-					decoder->startBuffering();
-					break;
-					
-				case Paused:
-					break;
-					
-				default:
-					break;
-			}
-			
-			state = Playing;
-		}
 	}
 	
 	void MoviePlayer::pause() {
-		if(decoder->isOpen()) {
-			switch(state) {
-				case Stopped:
-				case Paused:
-					break;
-					
-				case Playing:
-					break;
-			}
-			
-			state = Paused;
-		}
 	}
 	
 	void MoviePlayer::stop() {
-		if(decoder->isOpen()) {
-			switch(state) {
-				case Playing:
-				case Paused:
-					decoder->stopBuffering();
-					
-				case Stopped:
-					break;
-			}
-			
-			state = Stopped;
-		}
 	}
 	
 	void MoviePlayer::seek(double time) {
-		if(decoder->isOpen())
-			decoder->seek(time);
+	}
+	
+	void MoviePlayer::previousFrame() {
+		if(videoDecoder)
+			uploadFrame(pixelBuffer, texture, videoDecoder->previousFrame());
+	}
+	
+	void MoviePlayer::nextFrame() {
+		if(videoDecoder)
+			uploadFrame(pixelBuffer, texture, videoDecoder->nextFrame());
 	}
 	
 	bool MoviePlayer::isPlaying() const {
@@ -153,9 +133,9 @@ namespace jf {
 	}
 
 	void MoviePlayer::setRect(float x, float y, float w, float h) {
-		if(decoder->hasVideo()) {
-			int vW = decoder->getVideoWidth();
-			int vH = decoder->getVideoHeight();
+		if(videoDecoder) {
+			int vW = videoDecoder->getWidth();
+			int vH = videoDecoder->getHeight();
 			
 			float vR = vH / (float)vW;
 			float hNew = w * vR;
@@ -191,21 +171,7 @@ namespace jf {
 	}
 
 	void MoviePlayer::draw() {
-		if(decoder && decoder->hasVideo()) {
-			if(
-			if(state == Playing) {
-				VideoFrame::Ptr frame = decoder->nextVideoFrame();
-
-				double now = SDL_GetTicks() / 1000.0;
-
-				if(frame &&
-				   frame->outTime < (now - playStart))
-				{
-					uploadFrame(pixelBuffer, texture, frame);
-					decoder->popVideoFrame();
-				}
-			}
-			
+		if(videoDecoder) {
 			texture.bind();
 			vao.bind();
 			glDrawArrays(GL_TRIANGLE_FAN, 0, 4);

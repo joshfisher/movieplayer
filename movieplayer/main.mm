@@ -91,16 +91,14 @@ int main(int argc, char *argv[]) {
 					break;
 					
 				case SDL_KEYDOWN:
-					if(event.key.keysym.mod & (KMOD_LGUI | KMOD_RGUI)) {
-						if(event.key.keysym.sym == SDLK_p) {
-							if(movie.isPlaying())
-								movie.pause();
-							else if(movie.isPaused() || movie.isStopped())
-								movie.play();
-						}
-						else if(event.key.keysym.sym == SDLK_s) {
-							movie.stop();
-						}
+					switch(event.key.keysym.sym) {
+						case SDLK_RIGHT:
+							movie.nextFrame();
+							break;
+							
+						case SDLK_LEFT:
+							movie.previousFrame();
+							break;
 					}
 					break;
 					

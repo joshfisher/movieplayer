@@ -8,20 +8,184 @@
 
 #include "decoder.h"
 
-int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic);
-void mp_release_video_buffer(AVCodecContext* c, AVFrame* pic);
-
 namespace jf {
 	
-	std::once_flag ffmpeg_initialized;
+	AVPacket PacketQueue::FlushPacket;
 	
+	PacketQueue::PacketQueue() {
+		std::once_flag once;
+		std::call_once(once, [&]() {
+			av_init_packet(&FlushPacket);
+			FlushPacket.data = (uint8_t*)"FLUSH";
+		});
+	}
+	
+	bool PacketQueue::isEmpty() {
+		return packets.empty();
+	}
+	
+	void PacketQueue::push(AVPacket pkt) {
+		av_dup_packet(&pkt);
+		packets.push_back(pkt);
+	}
+	
+	int PacketQueue::pop(AVPacket* pkt) {
+		if(!packets.empty()) {
+			*pkt = packets.front();
+			packets.pop_front();
+			return 1;
+		}
+		return 0;
+	}
+	
+	void PacketQueue::flush() {
+		for(AVPacket& p : packets) {
+			if(!PacketQueue::isFlushPacket(p))
+				av_free_packet(&p);
+		}
+		packets.clear();
+		packets.push_back(FlushPacket);
+	}
+
+	bool PacketQueue::isFlushPacket(AVPacket pkt) {
+		return pkt.data == FlushPacket.data;
+	}
+
+	Demuxer* Demuxer::open(const char* path) {
+		// make sure everything is ready to go
+		static std::once_flag ffmpeg_initialized;
+		std::call_once(ffmpeg_initialized, []() {
+			avcodec_register_all();
+			av_register_all();
+			avformat_network_init();
+		});
+		
+		AVFormatContext* format = NULL;
+		
+		try {
+			// open the file
+			if(avformat_open_input(&format, path, NULL, NULL) < 0)
+				throw -1;
+			// read thru the header
+			if(avformat_find_stream_info(format, NULL) < 0) {
+				throw -1;
+			}
+			
+			// make a demuxer, return it
+			Demuxer* de = new Demuxer();
+			de->format = format;
+			return de;
+		}
+		catch(...) {
+			if(format) {
+				// something went wrong, clean up
+				avformat_close_input(&format);
+				format = NULL;
+			}
+		}
+		
+		return NULL;
+	}
+	
+	Demuxer::Demuxer()
+	:	format(NULL)
+	{}
+	
+	Demuxer::~Demuxer() {
+		if(format) {
+			avformat_close_input(&format);
+			
+			for(auto st : packetQueues)
+				delete st.second;
+			packetQueues.clear();
+		}
+	}
+	
+	AVFormatContext* Demuxer::getFormat() {
+		return format;
+	}
+
+	AVStream* Demuxer::getStream(int idx) {
+		if(idx < 0 || idx >= format->nb_streams)
+			return NULL;
+		return format->streams[idx];
+	}
+	
+	int Demuxer::getStreamIndex(AVMediaType type) {
+		// look up the best-guess stream index for media type
+		return av_find_best_stream(format, type, -1, -1, NULL, 0);
+	}
+	
+	PacketQueue* Demuxer::getPacketQueue(int idx) {
+		if(idx < 0 || idx >= format->nb_streams)
+			return NULL;
+		
+		// check to see if we already made one
+		if(packetQueues.count(idx))
+			return packetQueues[idx];
+		
+		// guess not, get the stream
+		AVStream* st = format->streams[idx];
+		// and the codec context
+		AVCodecContext* ctx = st->codec;
+		// find the decoder
+		AVCodec* codec = avcodec_find_decoder(ctx->codec_id);
+		// initialize the decoder
+		if(avcodec_open2(ctx, codec, NULL) < 0)
+			return NULL;
+		
+		// go ahead and allocate some storage
+		ctx->opaque = (uint64_t*)av_malloc(sizeof(uint64_t));
+		
+		// make a new packet queue, store it, return it
+		PacketQueue* queue = new PacketQueue;
+		packetQueues[idx] = queue;
+		return queue;
+	}
+
+	void Demuxer::demux(int idx) {
+		if(idx < 0 || idx >= format->nb_streams)
+			return;
+		
+		// make sure we event care about this stream
+		if(packetQueues.count(idx)) {
+			AVPacket packet;
+			// pull packets until we find the stream we want
+			while(true) {
+				// get the next packet
+				if(av_read_frame(format, &packet) < 0)
+					return;
+				
+				// check if its a stream we care about
+				if(packetQueues.count(packet.stream_index)) {
+					// store the packet
+					packetQueues[packet.stream_index]->push(packet);
+					// and return if it was the one we wanted
+					if(packet.stream_index == idx)
+						return;
+				}
+				else {
+					// otherwise clean up and move on
+					av_free_packet(&packet);
+				}
+			}
+		}
+	}
+	
+	void Demuxer::seekToTime(double time) {
+		int idx = getStreamIndex(AVMEDIA_TYPE_VIDEO);
+		
+		for(auto p : packetQueues)
+			p.second->flush();
+	}
+
 	VideoFrame::VideoFrame()
 	:	width(0)
 	,	height(0)
 	,	numBytes(0)
 	,	bytes(NULL)
 	{}
-
+	
 	VideoFrame::~VideoFrame() {
 		if(bytes)
 			delete [] bytes;
@@ -40,11 +204,26 @@ namespace jf {
 		return Ptr(fr);
 	}
 
+	uint64_t avcontext_getOpaque(AVCodecContext* context) {
+		return *(uint64_t*)context->opaque;
+	}
+	
+	void avcontext_setOpaque(AVCodecContext* context, uint64_t i) {
+		*(uint64_t*)context->opaque = i;
+	}
+	
+	uint64_t avframe_getOpaque(AVFrame* frame) {
+		return *(uint64_t*)frame->opaque;
+	}
+	
+	void avframe_setOpaque(AVFrame* frame, uint64_t i) {
+		*(uint64_t*)frame->opaque = i;
+	}
+
 	int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic) {
 		int ret = avcodec_default_get_buffer(c, pic);
-		uint64_t* pts = (uint64_t*)av_malloc(sizeof(uint64_t));
-		*pts = *(uint64_t*)c->opaque;
-		pic->opaque = pts;
+		pic->opaque = av_malloc(sizeof(uint64_t));
+		avframe_setOpaque(pic, avcontext_getOpaque(c));
 		return ret;
 	}
 	
@@ -53,303 +232,146 @@ namespace jf {
 		avcodec_default_release_buffer(c, pic);
 	}
 
-	Demuxer* Demuxer::open(const char* path) {
-		std::call_once(ffmpeg_initialized, []() {
-			avcodec_register_all();
-			av_register_all();
-			avformat_network_init();
-		});
-		
-		AVFormatContext* format = NULL;
-		
-		try {
-			if(avformat_open_input(&format, path, NULL, NULL) < 0)
-				throw -1;
-			if(avformat_find_stream_info(format, NULL) < 0) {
-				throw -1;
-			}
-			
-			Demuxer* de = new Demuxer();
-			de->format = format;
-			return de;
-		}
-		catch(...) {
-			if(format)
-				avformat_close_input(&format);
-		}
-		
-		return NULL;
-	}
-	
-	Demuxer::Demuxer()
-	:	format(NULL)
-	{}
-	
-	Demuxer::~Demuxer() {
-		if(format) {
-			avformat_close_input(&format);
-			format = NULL;
-		}
-	}
-	
 	VideoDecoder* VideoDecoder::open(Demuxer* de) {
-		AVCodec* codec = NULL;
-		int streamIdx = av_find_best_stream(de->format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
-		if(streamIdx < 0 || !codec)
+		if(!de)
 			return NULL;
 		
-		AVStream* stream = de->format->streams[streamIdx];
-		AVCodecContext* context = stream->codec;
-		if(avcodec_open2(context, codec, NULL) < 0)
+		int st = de->getStreamIndex(AVMEDIA_TYPE_VIDEO);
+		if(st < 0)
 			return NULL;
 		
 		VideoDecoder* dec = new VideoDecoder();
-		dec->
+		dec->demuxer = de;
+		dec->packets = de->getPacketQueue(st);
+		dec->streamIdx = st;
+		dec->context = de->getStream(st)->codec;
+		dec->frame = avcodec_alloc_frame();
+		dec->frameRGB = avcodec_alloc_frame();
+
+		// look at link for why we need to override the frame creation and release functions
+		// http://dranger.com/ffmpeg/tutorial05.html
+		dec->context->get_buffer = mp_create_video_buffer;
+		dec->context->release_buffer = mp_release_video_buffer;
+		
+		dec->width = dec->context->width;
+		dec->height = dec->context->height;
+		dec->bytesPerFrame = avpicture_get_size(PIX_FMT_RGB24, dec->width, dec->height);
+		
+		dec->sws = sws_getCachedContext(dec->sws,
+										dec->width,
+										dec->height,
+										dec->context->pix_fmt,
+										dec->width,
+										dec->height,
+										PIX_FMT_RGB24,
+										SWS_BILINEAR,
+										NULL,
+										NULL,
+										NULL);
+
+		return dec;
 	}
 	
 	VideoDecoder::VideoDecoder()
-	:	demuxer(NULL)
-	,	streamIdx(-1)
-	,	stream(NULL)
+	:	streamIdx(-1)
 	,	context(NULL)
 	,	frame(NULL)
 	,	frameRGB(NULL)
 	,	sws(NULL)
+	,	width(0)
+	,	height(0)
+	,	bytesPerFrame(0)
+	,	clock(0.0)
+	,	frameNumber(0L)
 	{}
 	
 	VideoDecoder::~VideoDecoder() {
-		if(context) {
-			if(context->opaque)
-				av_free(context->opaque);
-			avcodec_close(context);
-		}
+		av_free(frame);
+		av_free(frameRGB);
+		sws_freeContext(sws);
 	}
 
-	bool Decoder::openVideo() {
-		AVCodec* codec = NULL;
-		int stream = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
-		if(stream < 0 || !codec) {
-			return false;
-		}
+	int VideoDecoder::getWidth() { return width; }
+	int VideoDecoder::getHeight() { return height; }
+	int VideoDecoder::getBytesPerFrame() { return bytesPerFrame; }
+
+	VideoFrame::Ptr VideoDecoder::previousFrame() {
+		seekToFrame(context->frame_number - 1);
+		return nextFrame();
+	}
+	
+	VideoFrame::Ptr VideoDecoder::nextFrame() {
+		AVPacket packet;
 		
-		video.streamIdx = stream;
-		video.stream = format->streams[video.streamIdx];
-		video.context = video.stream->codec;
-		if(avcodec_open2(video.context, codec, NULL) < 0)
-			return false;
-		
-		video.width = video.context->width;
-		video.height = video.context->height;
-		video.bytesPerFrame = avpicture_get_size(PIX_FMT_RGB24, video.width, video.height);
-		
-		video.context->opaque = (uint64_t*)av_malloc(sizeof(uint64_t));
-		video.context->get_buffer = mp_create_video_buffer;
-		video.context->release_buffer = mp_release_video_buffer;
-		
-		video.frame = avcodec_alloc_frame();
-		video.frameRGB = avcodec_alloc_frame();
-		video.sws = sws_getCachedContext(video.sws,
-										 video.width,
-										 video.height,
-										 video.context->pix_fmt,
-										 video.width,
-										 video.height,
-										 PIX_FMT_RGB24,
-										 SWS_BILINEAR,
-										 NULL,
-										 NULL,
-										 NULL);
-		video.clock = 0.0;
-
-		return true;
-	}
-	
-	void Decoder::closeVideo() {
-		if(video.context) {
-			av_free(video.context->opaque);
-			avcodec_close(video.context);
-			
-			av_free(video.frame);
-			av_free(video.frameRGB);
-			sws_freeContext(video.sws);
-		}
-
-		video.stream = NULL;
-		video.context = NULL;
-		video.frame = NULL;
-		video.frameRGB = NULL;
-		video.sws = NULL;
-		video.width = 0;
-		video.height = 0;
-		video.bytesPerFrame = 0;
-		video.streamIdx = -1;
-	}
-	
-	Decoder::Decoder()
-	:	format(NULL)
-	,	shutdown(false)
-	{
-
-		video.context = NULL;
-		video.streamIdx = -1;
-		video.bytesPerFrame = 0;
-		video.width = 0;
-		video.height = 0;
-	}
-	
-	void Decoder::close() {
-		closeVideo();
-	}
-	
-	bool Decoder::isOpen() const {
-		return (hasAudio() || hasVideo());
-	}
-	
-	bool Decoder::hasVideo() const {
-		return format && video.streamIdx >= 0 && video.context != NULL;
-	}
-	
-	int Decoder::getVideoWidth() const {
-		return video.width;
-	}
-	
-	int Decoder::getVideoHeight() const {
-		return video.height;
-	}
-	
-	int Decoder::getBytesPerVideoFrame() const {
-		return video.bytesPerFrame;
-	}
-
-	void Decoder::seek(double ms) {
-		if(isOpen()) {
-			uint64_t num = video.stream->time_base.den;
-			uint64_t den = video.stream->time_base.num;
-			uint64_t pts = av_rescale(ms, num, den);
-			avformat_seek_file(format, video.streamIdx, INT64_MIN, pts, pts, 0);
-			avcodec_flush_buffers(video.context);
-		}
-	}
-	
-	void Decoder::stepForward() {
-		
-	}
-	
-	void Decoder::stepBackward() {
-		
-	}
-
-	VideoFrame::Ptr Decoder::grabVideoForTime(double time) {
-		seek(time);
-
+		// keep decoding until we have a whole frame
 		while(true) {
-			av_read_frame(format, &video.packet);
-			if(video.packet.stream_index == video.streamIdx)
-				break;
-		}
+			if(packets->isEmpty()) {
+				// fetch more packets
+				demuxer->demux(streamIdx);
+			}
 			
-		int complete = 0;
-		while(!complete)
-			avcodec_decode_video2(video.context, video.frame, &complete, &video.packet);
-
-		VideoFrame::Ptr rez = VideoFrame::create(time, video.width, video.height, video.bytesPerFrame, NULL);
-		avpicture_fill((AVPicture*)video.frameRGB, rez->bytes, PIX_FMT_RGB24, video.width, video.height);
-		sws_scale(video.sws, (uint8_t const* const*)video.frame->data, video.frame->linesize, 0, video.height, video.frameRGB->data, video.frameRGB->linesize);
-		return rez;
-	}
-
-	VideoFrame::Ptr Decoder::previousVideoFrame() {
-		
-	}
-
-	VideoFrame::Ptr Decoder::nextVideoFrame() {
-		VideoFrame::Ptr frame = frameQueue.front();
-		if(frame)
-			return frame;
-		
-		return VideoFrame::Ptr();
-	}
-	
-	void Decoder::demux() {
-		if(av_read_frame(format, &packet) < 0) {
-			break;
-		}
-		
-		if(packet.stream_index == video.streamIdx)
-			videoQueue.push(&packet);
-		else if(packet.stream_index == audio.streamIdx)
-			audioQueue.push(&packet);
-		else
-			av_free_packet(&packet);
-	}
-	
-	void Decoder::decodeVideo() {
-		while(!shutdown) {
-			if(frameQueue.count > 15) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			if(!packets->pop(&packet))
+				// i guess we're out of packets
+				break;
+			
+			if(PacketQueue::isFlushPacket(packet)) {
+				avcodec_flush_buffers(context);
 				continue;
 			}
+
+			// look at link for a discussion of why the pts has to be handled this way
+			// http://dranger.com/ffmpeg/tutorial05.html
+			avcontext_setOpaque(context, packet.pts);
 			
-			// i'm guessing we're done
-			if(videoQueue.pop(&video.packet) == 0) {
-				break;
-			}
-			
-			*(uint64_t*)video.context->opaque = video.packet.pts;
-			
+			// decode next packet of video
 			int complete = 0;
-			avcodec_decode_video2(video.context, video.frame, &complete, &video.packet);
+			avcodec_decode_video2(context, frame, &complete, &packet);
+			// free allocated packet resources
+			av_free_packet(&packet);
 			
+			// figure out the actual pts of this frame
 			double pts = 0.0;
-			if(video.packet.dts == AV_NOPTS_VALUE && video.frame->opaque && *(uint64_t*)video.frame->opaque != AV_NOPTS_VALUE)
-				pts = *(uint64_t*)video.frame->opaque;
-			else if(video.packet.dts != AV_NOPTS_VALUE)
-				pts = video.packet.dts;
+			if(packet.dts == AV_NOPTS_VALUE && avframe_getOpaque(frame) != AV_NOPTS_VALUE)
+				pts = avframe_getOpaque(frame);
+			else if(packet.dts != AV_NOPTS_VALUE)
+				pts = packet.dts;
 			else
 				pts = 0;
 			
-			pts *= av_q2d(video.stream->time_base);
+			// put pts into seconds
+			frameNumber = pts;
+			pts *= av_q2d(context->time_base);
 			
+			printf("%lld\n", frameNumber);
+			
+			// we decoded a whole frame
 			if(complete) {
 				double delay;
 				
 				if(pts != 0)
-					video.clock = pts;
+					clock = pts;
 				else
-					pts = video.clock;
+					pts = clock;
 				
-				delay = av_q2d(video.context->time_base);
-				delay += video.frame->repeat_pict * (delay * 0.5);
-				video.clock += delay;
+				delay = av_q2d(context->time_base);
+				delay += frame->repeat_pict * (delay * 0.5);
+				clock += delay;
 				
-				VideoFrame::Ptr rez = VideoFrame::create(pts, video.width, video.height, video.bytesPerFrame, NULL);
-				avpicture_fill((AVPicture*)video.frameRGB, rez->bytes, PIX_FMT_RGB24, video.width, video.height);
-				sws_scale(video.sws, (uint8_t const* const*)video.frame->data, video.frame->linesize, 0, video.height, video.frameRGB->data, video.frameRGB->linesize);
-				
-				frameQueue.push(rez);
+				VideoFrame::Ptr rez = VideoFrame::create(pts, width, height, bytesPerFrame, NULL);
+				avpicture_fill((AVPicture*)frameRGB, rez->bytes, PIX_FMT_RGB24, width, height);
+				sws_scale(sws, (uint8_t const* const*)frame->data, frame->linesize, 0, height, frameRGB->data, frameRGB->linesize);
+				return rez;
 			}
-			
-			av_free_packet(&video.packet);
 		}
+		
+		return VideoFrame::Ptr();
 	}
 	
-	void Decoder::decodeAudio() {
-		while(!shutdown) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
-		}
+	void VideoDecoder::seekToFrame(int frame) {
+		demuxer->seekToFrame(frame);
 	}
-
-}
-
-int mp_create_video_buffer(AVCodecContext* c, AVFrame* pic) {
-	int ret = avcodec_default_get_buffer(c, pic);
-	uint64_t* pts = (uint64_t*)av_malloc(sizeof(uint64_t));
-	*pts = *(uint64_t*)c->opaque;
-	pic->opaque = pts;
-	return ret;
-}
-
-void mp_release_video_buffer(AVCodecContext* c, AVFrame* pic) {
-	if(pic) av_freep(&pic->opaque);
-	avcodec_default_release_buffer(c, pic);
+	
+	void VideoDecoder::seekToTime(double time) {
+	}
+	
 }

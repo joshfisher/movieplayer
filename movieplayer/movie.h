@@ -12,7 +12,8 @@
 
 namespace jf {
 	
-	class Decoder;
+	class Demuxer;
+	class VideoDecoder;
 	
 	class MoviePlayer {
 	public:
@@ -26,6 +27,8 @@ namespace jf {
 		void pause();
 		void stop();
 		void seek(double sec);
+		void previousFrame();
+		void nextFrame();
 		
 		bool isPlaying() const;
 		bool isPaused() const;
@@ -35,7 +38,8 @@ namespace jf {
 		void draw();
 		
 	private:
-		Decoder* decoder;
+		Demuxer* demuxer;
+		VideoDecoder* videoDecoder;
 		
 		enum {
 			Playing,
