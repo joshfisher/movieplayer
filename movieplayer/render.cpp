@@ -34,7 +34,44 @@ namespace jf {
 		{GL_GEOMETRY_SHADER, "geometry"},
 		{GL_FRAGMENT_SHADER, "fragment"}
 	};
+	
+	VertexArray::VertexArray()
+	:	uid(0)
+	{}
+	
+	void VertexArray::create() {
+		glGenVertexArrays(1, &uid);
+		bind();
+	}
+	
+	void VertexArray::destroy() {
+		glDeleteVertexArrays(1, &uid);
+		uid = 0;
+	}
+	
+	void VertexArray::bind() {
+		glBindVertexArray(uid);
+	}
+	
+	void VertexArray::unbind() {
+		glBindVertexArray(0);
+	}
 
+	VertexLayout::VertexLayout()
+	:	stride(0)
+	{}
+	
+	void VertexLayout::addAttribute(GLint loc, GLint size, GLenum type) {
+		attributes.push_back({loc,size,type});
+	}
+	
+	void VertexLayout::fitStrideToAttributes() {
+		stride = 0;
+		for(Attribute& attrib : attributes) {
+			stride += attrib.size * glTypeSizeLookup.at(attrib.type);
+		}
+	}
+	
 	Buffer::Buffer()
 	:	uid(0)
 	,	target(0)
@@ -79,50 +116,13 @@ namespace jf {
 		glUnmapBuffer(target);
 	}
 	
-	VertexLayout::VertexLayout()
-	:	stride(0)
-	{}
-	
-	void VertexLayout::addAttribute(GLint loc, GLint size, GLenum type) {
-		attributes.push_back({loc,size,type});
-	}
-	
-	void VertexLayout::fitStrideToAttributes() {
-		stride = 0;
-		for(Attribute& attrib : attributes) {
-			stride += attrib.size * glTypeSizeLookup.at(attrib.type);
-		}
-	}
-	
-	void VertexLayout::configure() {
+	void Buffer::configure(const VertexLayout& layout) {
 		int offset = 0;
-		for(Attribute& attrib : attributes) {
+		for(const VertexLayout::Attribute& attrib : layout.attributes) {
 			glEnableVertexAttribArray(attrib.location);
-			glVertexAttribPointer(attrib.location, attrib.size, attrib.type, GL_FALSE, stride, BUFFER_OFFSET(offset));
+			glVertexAttribPointer(attrib.location, attrib.size, attrib.type, GL_FALSE, layout.stride, BUFFER_OFFSET(offset));
 			offset += attrib.size * glTypeSizeLookup.at(attrib.type);
 		}
-	}
-	
-	VertexArray::VertexArray()
-	:	uid(0)
-	{}
-
-	void VertexArray::create() {
-		glGenVertexArrays(1, &uid);
-		bind();
-	}
-	
-	void VertexArray::destroy() {
-		glDeleteVertexArrays(1, &uid);
-		uid = 0;
-	}
-	
-	void VertexArray::bind() {
-		glBindVertexArray(uid);
-	}
-	
-	void VertexArray::unbind() {
-		glBindVertexArray(0);
 	}
 
 	Program::Program()

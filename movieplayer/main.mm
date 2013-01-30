@@ -7,6 +7,7 @@
 //
 
 #include "movie.h"
+#include "audio.h"
 
 #include <string>
 #include <fstream>
@@ -67,6 +68,12 @@ int main(int argc, char *argv[]) {
 	int projLoc = prog.getUniformLocation("projectionMatrix");
 	prog.setUniform(projLoc, glm::ortho(0.f,1.f,0.f,aspect,-1.f,1.f));
 	
+	jf::AudioPlayer audio;
+	if(audio.open("resources/audio_loop2.m4a")) {
+		audio.setLooping(true);
+		audio.play();
+	}
+	
 	jf::MoviePlayer movie;
 	if(movie.open("resources/real.mov")) {
 		movie.setRect(0,0,1,aspect);
@@ -99,6 +106,14 @@ int main(int argc, char *argv[]) {
 						case SDLK_LEFT:
 							movie.previousFrame();
 							break;
+							
+						case SDLK_RETURN:
+							if(movie.isPlaying())
+								movie.pause();
+							else
+								movie.play();
+							
+							break;
 					}
 					break;
 					
@@ -117,6 +132,7 @@ int main(int argc, char *argv[]) {
 	
 	prog.destroy();
 	movie.close();
+	audio.close();
 	
 	SDL_GL_DeleteContext(ctx);
 	SDL_DestroyWindow(win);

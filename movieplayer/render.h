@@ -17,6 +17,32 @@
 #include <glm/glm.hpp>
 
 namespace jf {
+
+	class VertexArray {
+	public:
+		GLuint uid;
+		
+		VertexArray();
+		void create();
+		void destroy();
+		void bind();
+		void unbind();
+	};
+
+	struct VertexLayout {
+	public:
+		struct Attribute {
+			GLint location;
+			GLint size;
+			GLenum type;
+		};
+		GLsizei stride;
+		std::vector<Attribute> attributes;
+		
+		VertexLayout();
+		void addAttribute(GLint loc, GLint size, GLenum type);
+		void fitStrideToAttributes();
+	};
 	
 	class Buffer {
 	public:
@@ -33,6 +59,7 @@ namespace jf {
 		void unbind();
 
 		void upload(GLsizeiptr size, const void* data);
+		void configure(const VertexLayout& layout);
 		
 		void* map(GLenum usage);
 		void unmap();
@@ -40,33 +67,6 @@ namespace jf {
 		explicit operator bool();
 	};
 
-	struct VertexLayout {
-	public:
-		struct Attribute {
-			GLint location;
-			GLint size;
-			GLenum type;
-		};
-		GLsizei stride;
-		std::vector<Attribute> attributes;
-		
-		VertexLayout();
-		void addAttribute(GLint loc, GLint size, GLenum type);
-		void fitStrideToAttributes();
-		void configure();
-	};
-
-	class VertexArray {
-	public:
-		GLuint uid;
-		
-		VertexArray();
-		void create();
-		void destroy();
-		void bind();
-		void unbind();
-	};
-	
 	class Program {
 	public:
 		typedef std::map<std::string,GLint> LocationMap;

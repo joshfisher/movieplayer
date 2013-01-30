@@ -51,15 +51,18 @@ namespace jf {
 		return pkt.data == FlushPacket.data;
 	}
 
-	Demuxer* Demuxer::open(const char* path) {
-		// make sure everything is ready to go
-		static std::once_flag ffmpeg_initialized;
-		std::call_once(ffmpeg_initialized, []() {
+	struct FFMpegInit {
+		FFMpegInit() {
 			avcodec_register_all();
 			av_register_all();
 			avformat_network_init();
-		});
-		
+		}
+		~FFMpegInit() {
+		}
+	};
+	static FFMpegInit ffmpegInit;
+	
+	Demuxer* Demuxer::open(const char* path) {
 		AVFormatContext* format = NULL;
 		
 		try {
@@ -182,7 +185,8 @@ namespace jf {
 	}
 
 	VideoFrame::VideoFrame()
-	:	width(0)
+	:	outTime(0.0)
+	,	width(0)
 	,	height(0)
 	,	numBytes(0)
 	,	bytes(NULL)
@@ -205,7 +209,35 @@ namespace jf {
 		}
 		return Ptr(fr);
 	}
+	
+	AudioBuffer::AudioBuffer()
+	:	outTime(0.0)
+	,	sampleRate(0)
+	,	numBytes(0)
+	,	bytes(NULL)
+	{}
+	
+	AudioBuffer::~AudioBuffer() {
+		if(bytes)
+			delete [] bytes;
+	}
+	
+	AudioBuffer::Ptr AudioBuffer::create(double o, int sr, int sz, uint8_t* ptr) {
+		AudioBuffer* buf = new AudioBuffer;
+		buf->outTime = o;
+		buf->sampleRate = sr;
+		buf->numBytes = sz;
+		buf->bytes = new uint8_t[sz];
+		if(ptr) {
+			memcpy(buf->bytes, ptr, sz);
+		}
+		return Ptr(buf);
+	}
+	
 
+	// this crap is to help ffmpeg assure good packet ordering
+	// but i think it isn't necessary anymore because now ffmpeg
+	// does it internally (hopefully)
 //	uint64_t avcontext_getOpaque(AVCodecContext* context) {
 //		return *(uint64_t*)context->opaque;
 //	}
@@ -292,6 +324,7 @@ namespace jf {
 	,	clock(0.0)
 	,	nextFrameTime(0.0)
 	,	currentFrame(0)
+	,	lastFrame(false)
 	{}
 	
 	VideoDecoder::~VideoDecoder() {
@@ -303,6 +336,7 @@ namespace jf {
 	int VideoDecoder::getWidth() { return width; }
 	int VideoDecoder::getHeight() { return height; }
 	int VideoDecoder::getBytesPerFrame() { return bytesPerFrame; }
+	bool VideoDecoder::isLastFrame() { return lastFrame; }
 
 	VideoFrame::Ptr VideoDecoder::previousFrame() {
 		int64_t pts = (currentFrame - 1);
@@ -336,22 +370,23 @@ namespace jf {
 				demuxer->demux(streamIdx);
 			}
 			
-			if(!packets->pop(&packet))
+			if(!packets->pop(&packet)) {
 				// i guess we're out of packets
+				lastFrame = true;
 				break;
+			}
 			
 			if(PacketQueue::isFlushPacket(packet)) {
 				avcodec_flush_buffers(context);
 				continue;
 			}
-
-			// look at link for a discussion of why the pts has to be handled this way
-			// http://dranger.com/ffmpeg/tutorial05.html
-//			avcontext_setOpaque(context, packet.pts);
 			
 			// decode next packet of video
 			int complete = 0;
-			avcodec_decode_video2(context, frame, &complete, &packet);
+			int error = 0;
+			if((error = avcodec_decode_video2(context, frame, &complete, &packet)) < 0) {
+				printf("ffmpeg video decoding error: %x\n", error);
+			}
 			// free allocated packet resources
 			av_free_packet(&packet);
 
@@ -380,8 +415,143 @@ namespace jf {
 	int64_t VideoDecoder::getCurrentFrame() { return currentFrame; }
 	double VideoDecoder::getCurrentTime() { return clock; }
 	double VideoDecoder::getNextTime() { return nextFrameTime; }
-	
+
 	void VideoDecoder::seekToFrame(int64_t frame) { demuxer->seekToTime(frame * av_q2d(stream->time_base)); }
-	void VideoDecoder::seekToTime(double time) { demuxer->seekToTime(time); }
 	
+	void VideoDecoder::seekToTime(double time) {
+		demuxer->seekToTime(time);
+		lastFrame = false;
+	}
+
+	AudioDecoder::AudioDecoder()
+	:	demuxer(NULL)
+	,	packets(NULL)
+	,	frame(NULL)
+	,	frameSize(0)
+	,	sampleRate(0)
+	,	sampleSize(0)
+	,	channels(0)
+	,	lastBuffer(false)
+	,	swr(NULL)
+	{}
+	
+	AudioDecoder* AudioDecoder::open(Demuxer* de) {
+		if(!de)
+			return NULL;
+		
+		int st = de->getStreamIndex(AVMEDIA_TYPE_AUDIO);
+		if(st < 0)
+			return NULL;
+		
+		AudioDecoder* dec = new AudioDecoder();
+		dec->demuxer = de;
+		dec->packets = de->getPacketQueue(st);
+		dec->streamIdx = st;
+		dec->stream = de->getStream(st);
+		dec->context = dec->stream->codec;
+		dec->frame = avcodec_alloc_frame();
+
+		dec->frameSize = av_samples_get_buffer_size(NULL, 2, 1024, AV_SAMPLE_FMT_S16, 1);
+		dec->sampleRate = 44100;
+		dec->sampleSize = 2;
+		dec->channels = 2;
+		
+		dec->swr = swr_alloc_set_opts(NULL,
+									  AV_CH_LAYOUT_STEREO,
+									  AV_SAMPLE_FMT_S16,
+									  dec->sampleRate,
+									  dec->context->channel_layout,
+									  dec->context->sample_fmt,
+									  dec->context->sample_rate,
+									  0,
+									  NULL);
+		swr_init(dec->swr);
+		
+		return dec;
+	}
+	
+	AudioDecoder::~AudioDecoder() {
+		av_free(frame);
+		swr_free(&swr);
+	}
+	
+	bool AudioDecoder::isLastBuffer() const { return lastBuffer; }
+	int AudioDecoder::getSampleRate() const { return sampleRate; }
+	int AudioDecoder::getSampleSize() const { return sampleSize; }
+	int AudioDecoder::getFrameSize() const { return frameSize; }
+	int AudioDecoder::getChannelCount() const { return context->channels; }
+
+	AudioBuffer::Ptr AudioDecoder::convert(AVFrame* frame) {
+		// do the conversion
+		
+		double out = frame->pkt_dts * av_q2d(stream->time_base);
+		AudioBuffer::Ptr buffer = AudioBuffer::create(out, sampleRate, frameSize, NULL);
+		
+		unsigned char* pointers[SWR_CH_MAX] = {NULL};
+		pointers[0] = buffer->bytes;
+		
+		int samplesCount = swr_convert(swr,
+									   pointers,
+									   1024,
+									   (const unsigned char**)frame->extended_data,
+									   frame->nb_samples);
+		
+		if(samplesCount <= 0)
+			return AudioBuffer::Ptr();
+		
+		return buffer;
+	}
+	
+	AudioBuffer::Ptr AudioDecoder::nextBuffer() {
+		AVPacket packet;
+		AudioBuffer::Ptr buffer;
+		
+		int complete = 0;
+		while(!complete) {
+			if(packets->isEmpty()) {
+				// fetch more packets
+				demuxer->demux(streamIdx);
+			}
+			
+			if(!packets->pop(&packet)) {
+				// i guess we're out of packets
+				lastBuffer = true;
+				break;
+			}
+			
+			if(PacketQueue::isFlushPacket(packet)) {
+				avcodec_flush_buffers(context);
+				continue;
+			}
+			
+			AVPacket tmp = packet;
+			while(tmp.size > 0) {
+				int result = avcodec_decode_audio4(context, frame, &complete, &tmp);
+				
+				if(result < 0) {
+					printf("ffmpeg audio decoding error %d\n", result);
+					break;
+				}
+				
+				if(complete == 0) {
+					break;
+				}
+				
+				buffer = convert(frame);
+				
+				tmp.size -= result;
+				tmp.data += result;
+			}
+			
+			av_free_packet(&packet);
+		}
+
+		return buffer;
+	}
+	
+	void AudioDecoder::seekToTime(double time) {
+		demuxer->seekToTime(time);
+		lastBuffer = false;
+	}
+
 }

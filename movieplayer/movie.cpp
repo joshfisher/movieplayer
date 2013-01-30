@@ -20,7 +20,10 @@
 
 namespace jf {
 	
-	void uploadFrame(Buffer pbo, Texture tex, VideoFrame::Ptr frame) {
+	bool uploadFrame(Buffer pbo, Texture tex, VideoFrame::Ptr frame) {
+		if(!frame)
+			return false;
+		
 		tex.bind();
 		
 		pbo.bind();
@@ -31,14 +34,23 @@ namespace jf {
 		
 		tex.generateMipMaps();
 		tex.unbind();
+		
+		return true;
 	}
 	
 	MoviePlayer::MoviePlayer()
 	:	demuxer(NULL)
 	,	videoDecoder(NULL)
+	,	audioDecoder(NULL)
 	,	state(Stopped)
-	,	playStart(0)
+	,	playStartTime(0)
+	,	pauseStartTime(0)
+	,	pauseElapsedTime(0)
 	{}
+	
+	MoviePlayer::~MoviePlayer() {
+		close();
+	}
 	
 	bool MoviePlayer::open(const char* path) {
 		close();
@@ -72,7 +84,7 @@ namespace jf {
 		layout.addAttribute(0, 2, GL_FLOAT);
 		layout.addAttribute(1, 2, GL_FLOAT);
 		layout.fitStrideToAttributes();
-		layout.configure();
+		quad.configure(layout);
 		vao.unbind();
 		
 		quad.unbind();
@@ -92,6 +104,10 @@ namespace jf {
 			delete videoDecoder;
 			videoDecoder = NULL;
 		}
+		if(audioDecoder) {
+			delete audioDecoder;
+			audioDecoder = NULL;
+		}
 		if(demuxer) {
 			delete demuxer;
 			demuxer = NULL;
@@ -99,31 +115,65 @@ namespace jf {
 	}
 	
 	void MoviePlayer::play() {
+		if(state != Playing) {
+			switch(state) {
+				case Stopped:
+					videoDecoder->seekToFrame(0);
+					playStartTime = SDL_GetTicks();
+					pauseElapsedTime = 0;
+					break;
+					
+				case Paused:
+					pauseElapsedTime += (SDL_GetTicks() - pauseStartTime);
+					break;
+					
+				default:
+					break;
+			}
+			
+			state = Playing;
+		}
 	}
 	
 	void MoviePlayer::pause() {
+		if(state != Paused) {
+			switch(state) {
+				case Playing:
+					pauseStartTime = SDL_GetTicks();
+					break;
+					
+				default:
+					break;
+			}
+			
+			state = Paused;
+		}
 	}
 	
 	void MoviePlayer::stop() {
+		if(state != Stopped) {
+			state = Stopped;
+		}
 	}
 	
-	void MoviePlayer::seek(double time) {
+	void MoviePlayer::seek(float time) {
+		videoDecoder->seekToTime(time);
 	}
 	
 	void MoviePlayer::previousFrame() {
 		if(videoDecoder) {
-			VideoFrame::Ptr frame = videoDecoder->previousFrame();
-			if(frame) {
-				uploadFrame(pixelBuffer, texture, frame);
-			}
+			pause();
+			uploadFrame(pixelBuffer, texture, videoDecoder->previousFrame());
 		}
 	}
 	
 	void MoviePlayer::nextFrame() {
-		if(videoDecoder) {
-			VideoFrame::Ptr frame = videoDecoder->nextFrame();
-			if(frame) {
-				uploadFrame(pixelBuffer, texture, frame);
+		if(videoDecoder && state != Complete) {
+			pause();
+			if(!uploadFrame(pixelBuffer, texture, videoDecoder->nextFrame())) {
+				if(videoDecoder->isLastFrame()) {
+					state = Complete;
+				}
 			}
 		}
 	}
@@ -138,6 +188,10 @@ namespace jf {
 	
 	bool MoviePlayer::isStopped() const {
 		return state == Stopped;
+	}
+	
+	bool MoviePlayer::isFinished() const {
+		return state == Complete;
 	}
 
 	void MoviePlayer::setRect(float x, float y, float w, float h) {
@@ -180,6 +234,13 @@ namespace jf {
 
 	void MoviePlayer::draw() {
 		if(videoDecoder) {
+			double elapsed = (SDL_GetTicks() - playStartTime - pauseElapsedTime) / 1000.0;
+			double target = videoDecoder->getNextTime();
+			
+			if(state == Playing && elapsed >= target) {
+				uploadFrame(pixelBuffer, texture, videoDecoder->nextFrame());
+			}
+			
 			texture.bind();
 			vao.bind();
 			glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
@@ -188,3 +249,5 @@ namespace jf {
 		}
 	}
 }
+
+

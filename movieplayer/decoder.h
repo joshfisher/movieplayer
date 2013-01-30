@@ -9,9 +9,10 @@
 #pragma once
 
 extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
+	#include <libavcodec/avcodec.h>
+	#include <libavformat/avformat.h>
+	#include <libswscale/swscale.h>
+	#include <libswresample/swresample.h>
 }
 
 #include <thread>
@@ -80,6 +81,24 @@ namespace jf {
 		VideoFrame(const VideoFrame&) =delete;
 		VideoFrame& operator=(const VideoFrame&) =delete;
 	};
+	
+	struct AudioBuffer {
+		typedef std::shared_ptr<AudioBuffer> Ptr;
+		
+		int sampleRate;
+		int numBytes;
+		uint8_t* bytes;
+		
+		double outTime;
+		
+		~AudioBuffer();
+		static Ptr create(double o, int sr, int sz, uint8_t* ptr);
+		
+	private:
+		AudioBuffer();
+		AudioBuffer(const AudioBuffer&) =delete;
+		AudioBuffer& operator=(const AudioBuffer&) =delete;
+	};
 
 	class VideoDecoder  {
 	public:
@@ -89,6 +108,7 @@ namespace jf {
 		int getWidth();
 		int getHeight();
 		int getBytesPerFrame();
+		bool isLastFrame();
 		
 		VideoFrame::Ptr previousFrame();
 		VideoFrame::Ptr nextFrame();
@@ -117,6 +137,41 @@ namespace jf {
 		int64_t currentFrame;
 		int64_t currentDts;
 		int width, height, bytesPerFrame;
+		bool lastFrame;
+	};
+	
+	class AudioDecoder {
+	public:
+		static AudioDecoder* open(Demuxer*);
+		~AudioDecoder();
+		
+		bool isLastBuffer() const;
+		int getSampleRate() const;
+		int getSampleSize() const;
+		int getFrameSize() const;
+		int getChannelCount() const;
+		AudioBuffer::Ptr nextBuffer();
+		
+		void seekToTime(double time);
+		
+	private:
+		AudioDecoder();
+		AudioBuffer::Ptr convert(AVFrame*);
+		
+		Demuxer* demuxer;
+		PacketQueue* packets;
+		
+		int streamIdx;
+		AVStream* stream;
+		AVCodecContext* context;
+		AVFrame* frame;
+		SwrContext* swr;
+		
+		int frameSize;
+		int channels, sampleRate, sampleSize;
+		
+		bool lastBuffer;
 	};
 
 }
+
